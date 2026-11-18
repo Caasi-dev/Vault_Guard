@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -20,6 +21,35 @@ def sha256_file(path) -> str:
         while chunk := f.read(CHUNK):
             h.update(chunk)
     return h.hexdigest()
+
+
+def name_key(name: str) -> str:
+    """Clave de orden alfabético: ignora mayúsculas y acentos (Álbum ~ album, Ñ tras N)."""
+    s = unicodedata.normalize("NFD", name.casefold())
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+# Carpeta destino por extensión. Extensiones no listadas -> carpeta con su nombre (ej. "ZIP").
+CATEGORIES = {
+    "PDF": ["pdf"],
+    "Word": ["doc", "docx", "odt", "rtf"],
+    "Excel": ["xls", "xlsx", "csv", "ods"],
+    "PowerPoint": ["ppt", "pptx", "odp"],
+    "Texto": ["txt", "md", "log"],
+    "Imágenes": ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tiff", "ico"],
+    "Videos": ["mp4", "mkv", "avi", "mov", "wmv", "webm"],
+    "Audio": ["mp3", "wav", "flac", "ogg", "m4a", "aac"],
+    "Comprimidos": ["zip", "rar", "7z", "tar", "gz"],
+    "Código": ["py", "js", "ts", "html", "css", "java", "c", "cpp", "json", "xml", "sql"],
+}
+EXT_TO_FOLDER = {e: folder for folder, exts in CATEGORIES.items() for e in exts}
+
+
+def type_folder(filename: str) -> str:
+    ext = Path(filename).suffix.lstrip(".").lower()
+    if not ext:
+        return "Otros"
+    return EXT_TO_FOLDER.get(ext, ext.upper())
 
 
 class Vault:
@@ -57,9 +87,9 @@ class Vault:
 
     # ---------------- árbol de archivos ----------------
     def children(self, parent_id):
-        return self.db.execute(
-            "SELECT * FROM nodes WHERE parent_id IS ? ORDER BY is_dir DESC, LOWER(name)",
-            (parent_id,)).fetchall()
+        """Hijos de una carpeta: carpetas primero, luego orden alfabético (sin acentos ni mayúsculas)."""
+        rows = self.db.execute("SELECT * FROM nodes WHERE parent_id IS ?", (parent_id,)).fetchall()
+        return sorted(rows, key=lambda r: (not r["is_dir"], name_key(r["name"]), r["name"]))
 
     def node(self, node_id):
         return self.db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
@@ -128,18 +158,28 @@ class Vault:
         self.db.commit()
         return replaced
 
-    def add_external(self, parent_id, src):
-        """Añade archivo o carpeta (recursivo). Devuelve (añadidos, reemplazados)."""
+    def add_external(self, parent_id, src, organize=True):
+        """Añade archivo o carpeta (recursivo). Devuelve (añadidos, reemplazados).
+
+        Con organize=True cada archivo se guarda en una subcarpeta por tipo (PDF, Word, ...)
+        que se crea automáticamente dentro de la carpeta destino.
+        """
         src = Path(src)
         added = replaced = 0
         if src.is_dir():
             folder = self.mkdir(parent_id, src.name)
-            for child in sorted(src.iterdir()):
-                a, r = self.add_external(folder, child)
+            for child in sorted(src.iterdir(), key=lambda p: name_key(p.name)):
+                a, r = self.add_external(folder, child, organize)
                 added += a
                 replaced += r
         elif src.is_file():
-            if self.add_file(parent_id, src):
+            target = parent_id
+            if organize:
+                tf = type_folder(src.name)
+                cur = self.node(parent_id) if parent_id is not None else None
+                if not (cur and cur["name"] == tf):  # ya estamos dentro de la carpeta del tipo
+                    target = self.mkdir(parent_id, tf)
+            if self.add_file(target, src):
                 replaced += 1
             else:
                 added += 1
@@ -173,7 +213,7 @@ class Vault:
         """Lista (id, ruta) de todas las carpetas; id None = raíz."""
         out = [(None, "/ (raíz)")]
         rows = self.db.execute("SELECT id FROM nodes WHERE is_dir=1").fetchall()
-        out += sorted(((r["id"], "/" + self.path_of(r["id"])) for r in rows), key=lambda x: x[1].lower())
+        out += sorted(((r["id"], "/" + self.path_of(r["id"])) for r in rows), key=lambda x: name_key(x[1]))
         return out
 
     def delete(self, node_id):
@@ -298,7 +338,7 @@ class Vault:
             "SELECT * FROM entries WHERE snapshot_id=?", (sid,))}
         live = {p: (size, sha, storage) for _i, p, size, sha, storage in self.all_files()}
         results = []
-        for path in sorted(set(snap) | set(live), key=str.lower):
+        for path in sorted(set(snap) | set(live), key=name_key):
             s, l = snap.get(path), live.get(path)
             row = {"path": path, "status": "OK", "detail": "", "live_sha": None, "snap_sha": None,
                    "size": None}

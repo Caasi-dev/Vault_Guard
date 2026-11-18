@@ -132,7 +132,7 @@ class FilesPage(QWidget):
             bar.addWidget(b)
         lay.addLayout(bar)
 
-        self.drop = QLabel("⇩  Arrastra aquí archivos o carpetas para agregarlos a esta ubicación")
+        self.drop = QLabel("⇩  Arrastra aquí archivos o carpetas: se ordenan solos en carpetas por tipo (PDF, Word, Excel…)")
         self.drop.setObjectName("drop"); self.drop.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.drop)
 
